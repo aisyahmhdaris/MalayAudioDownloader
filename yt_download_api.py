@@ -3,8 +3,19 @@ import subprocess
 import tempfile
 import os
 import datetime
+import re
 
 app = Flask(__name__)
+
+def sanitize_filename(filename, max_length=100):
+    """Remove invalid chars and truncate to safe length."""
+    # keep only letters, digits, underscore, dash and dot
+    safe = re.sub(r'[^A-Za-z0-9._-]', '_', filename)
+    # ensure extension remains at the end
+    base, ext = os.path.splitext(safe)
+    if len(base) > max_length:
+        base = base[:max_length]
+    return base + ext
 
 @app.route("/download")
 def download_audio():
@@ -14,12 +25,15 @@ def download_audio():
     if not url:
         return jsonify({"error": "Missing 'url' parameter"}), 400
 
-    # create a temp file path
+    # clean and limit filename length
+    filename = sanitize_filename(filename, 80)
+
+    # create temp output path
     tmpfile = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3")
     output_path = tmpfile.name
     tmpfile.close()
 
-    # download and extract audio
+    # yt-dlp command
     command = ["yt-dlp", "-x", "--audio-format", "mp3", "-o", output_path, url]
 
     try:
@@ -27,16 +41,18 @@ def download_audio():
         size = os.path.getsize(output_path)
         timestamp = datetime.datetime.now().strftime("%d-%m-%Y %H:%M")
 
-        # create a response that sends the file AND metadata headers
         response = make_response(
-            send_file(output_path,
-                      mimetype="audio/mpeg",
-                      as_attachment=True,
-                      download_name=filename)
+            send_file(
+                output_path,
+                mimetype="audio/mpeg",
+                as_attachment=True,
+                download_name=filename,
+                conditional=True
+            )
         )
         response.headers["X-File-Size"] = str(size)
         response.headers["X-Download-Timestamp"] = timestamp
-        response.headers["X-YT-DLP-Log"] = log[:5000]  # truncate long logs
+        response.headers["X-YT-DLP-Log"] = log[:5000]
         return response
 
     except subprocess.CalledProcessError as e:
@@ -49,7 +65,7 @@ def download_audio():
 @app.route("/")
 def home():
     return jsonify({
-        "message": "Malay Audio Downloader API (binary streaming mode) 🚀",
+        "message": "Malay Audio Downloader API (safe filename version) 🚀",
         "usage": "/download?url=<YouTube_URL>&filename=<optional>"
     })
 
