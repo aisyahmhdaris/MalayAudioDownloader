@@ -6,12 +6,12 @@ from flask import Flask, request, jsonify, send_file
 
 app = Flask(__name__)
 
-# Optional cookie file (used only if present)
 COOKIE_FILE = os.getenv("COOKIE_FILE", "/etc/secrets/youtube_cookies2.txt")
 
 def has_cookie_file():
     """Check if a cookie file exists and is readable."""
     return os.path.exists(COOKIE_FILE) and os.access(COOKIE_FILE, os.R_OK)
+
 
 @app.route("/health", methods=["GET"])
 def health():
@@ -38,7 +38,7 @@ def download_audio():
         with tempfile.TemporaryDirectory() as tmpdir:
             output_path = os.path.join(tmpdir, filename)
 
-            # Build yt-dlp command
+            # Base yt-dlp command
             yt_dlp_command = [
                 "yt-dlp",
                 "--quiet",
@@ -46,14 +46,14 @@ def download_audio():
                 "--extract-audio",
                 "--audio-format", "mp3",
                 "--audio-quality", "0",
-                "-o", output_path,
-                url
             ]
 
-            # Add cookies only if available
+            # Add cookies flag *before* output path and URL
             if has_cookie_file():
-                yt_dlp_command.insert(-2, "--cookies")
-                yt_dlp_command.insert(-2, COOKIE_FILE)
+                yt_dlp_command += ["--cookies", COOKIE_FILE]
+
+            # Add output path and URL
+            yt_dlp_command += ["-o", output_path, url]
 
             result = subprocess.run(
                 yt_dlp_command,
