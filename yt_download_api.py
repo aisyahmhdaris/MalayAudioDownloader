@@ -10,8 +10,17 @@ app = Flask(__name__)
 def home():
     return jsonify({
         "message": "🎧 Malay Audio Downloader API is running!",
-        "endpoints": ["/download?url=<youtube_url>&filename=<output.mp3>"]
+        "endpoints": ["/download?url=<youtube_url>&filename=<output.mp3>", "/health"]
     })
+
+@app.route('/health')
+def health():
+    """Simple readiness check for Render or n8n."""
+    return jsonify({
+        "status": "ok",
+        "time": datetime.datetime.now().strftime("%d-%m-%Y %H:%M"),
+        "message": "API healthy ✅"
+    }), 200
 
 @app.route('/download', methods=['GET'])
 def download_audio():
@@ -26,7 +35,7 @@ def download_audio():
     safe_filename = "".join(c if c.isalnum() or c in ("_", "-", ".") else "_" for c in filename)
     output_path = os.path.join(temp_dir, safe_filename)
 
-    # --- Build yt-dlp command with read-only cookie file ---
+    # --- Build yt-dlp command with read-only cookie fix ---
     command = [
         "yt-dlp", "-x", "--audio-format", "mp3",
         "--ignore-errors", "--no-warnings", "--no-progress", "--quiet",
@@ -44,7 +53,7 @@ def download_audio():
         result = subprocess.run(command, capture_output=True, text=True, timeout=180)
         print("yt-dlp exit code:", result.returncode)
 
-        # Handle result and rename output file if needed
+        # Handle successful download
         if result.returncode == 0:
             mp3_files = [f for f in os.listdir(temp_dir) if f.endswith(".mp3")]
             if not mp3_files:
@@ -61,7 +70,7 @@ def download_audio():
             response = send_file(output_path, as_attachment=True, download_name=safe_filename)
             response.headers["X-File-Size"] = f"{size_mb:.2f} MB"
 
-            # Clean up asynchronously
+            # Clean up temporary files
             try:
                 for f in os.listdir(temp_dir):
                     os.remove(os.path.join(temp_dir, f))
