@@ -1,81 +1,68 @@
 import os
-import subprocess
 import tempfile
-from datetime import datetime
+import shutil
+import subprocess
 from flask import Flask, request, jsonify, send_file
+from datetime import datetime
 
 app = Flask(__name__)
 
-COOKIE_FILE = os.getenv("COOKIE_FILE", "/etc/secrets/youtube_cookies2.txt")
-
-def has_cookie_file():
-    """Check if a cookie file exists and is readable."""
-    return os.path.exists(COOKIE_FILE) and os.access(COOKIE_FILE, os.R_OK)
-
-
-@app.route("/health", methods=["GET"])
+@app.route("/health")
 def health():
-    """Simple health check endpoint."""
     return jsonify({
         "message": "API healthy ✅",
         "status": "ok",
-        "environment": "Render" if os.getenv("RENDER") else "Local",
-        "cookie_found": has_cookie_file(),
         "time": datetime.now().strftime("%d-%m-%Y %H:%M")
-    }), 200
+    })
 
-
-@app.route("/download", methods=["GET"])
-def download_audio():
-    """Download YouTube video as MP3."""
+@app.route("/download")
+def download():
     url = request.args.get("url")
-    filename = request.args.get("filename", "output.mp3")
+    filename = request.args.get("filename")
 
-    if not url:
-        return jsonify({"error": "Missing URL"}), 400
+    if not url or not filename:
+        return jsonify({"error": "Missing URL or filename"}), 400
+
+    tmp_dir = tempfile.mkdtemp()
+    output_path = os.path.join(tmp_dir, filename)
+
+    # Handle cookie file safely (Render secrets are read-only)
+    cookie_src = "/etc/secrets/youtube_cookies2.txt"
+    cookie_tmp = os.path.join(tmp_dir, "cookies.txt")
+
+    if os.path.exists(cookie_src):
+        shutil.copy(cookie_src, cookie_tmp)
+        cookie_arg = ["--cookies", cookie_tmp]
+    else:
+        cookie_arg = []
+
+    cmd = [
+        "yt-dlp",
+        "-x", "--audio-format", "mp3",
+        "--ignore-errors", "--no-warnings", "--no-progress",
+        "--quiet", "--no-write-info-json",
+        "-o", output_path,
+        *cookie_arg,
+        url
+    ]
+
+    log = f"⬇️ Downloading: {url}\nCommand: {' '.join(cmd)}\n"
 
     try:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            output_path = os.path.join(tmpdir, filename)
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        log += result.stdout + result.stderr
 
-            # Base yt-dlp command
-            yt_dlp_command = [
-                "yt-dlp",
-                "--quiet",
-                "--no-warnings",
-                "--extract-audio",
-                "--audio-format", "mp3",
-                "--audio-quality", "0",
-            ]
+        if result.returncode != 0 or not os.path.exists(output_path):
+            return jsonify({"log": log, "status": "failed"}), 500
 
-            # Add cookies flag *before* output path and URL
-            if has_cookie_file():
-                yt_dlp_command += ["--cookies", COOKIE_FILE]
-
-            # Add output path and URL
-            yt_dlp_command += ["-o", output_path, url]
-
-            result = subprocess.run(
-                yt_dlp_command,
-                capture_output=True,
-                text=True
-            )
-
-            if result.returncode != 0:
-                return jsonify({
-                    "status": "failed",
-                    "log": result.stderr or result.stdout
-                }), 500
-
-            return send_file(output_path, as_attachment=True)
-
+        size = os.path.getsize(output_path)
+        log += f"✅ File saved: {output_path} ({size / 1024 / 1024:.2f} MB)\n"
+        return send_file(output_path, as_attachment=True)
     except Exception as e:
-        return jsonify({
-            "status": "failed",
-            "log": str(e)
-        }), 500
-
+        return jsonify({"log": f"{log}\nERROR: {str(e)}", "status": "failed"}), 500
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
+    port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
