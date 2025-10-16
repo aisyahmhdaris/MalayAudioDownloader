@@ -1,97 +1,81 @@
 import os
-import tempfile
 import subprocess
-import datetime
-from flask import Flask, request, send_file, jsonify
+import tempfile
+from datetime import datetime
+from flask import Flask, request, jsonify, send_file
 
 app = Flask(__name__)
 
-@app.route('/')
-def home():
-    return jsonify({
-        "message": "🎧 Malay Audio Downloader API is running!",
-        "endpoints": ["/download?url=<youtube_url>&filename=<output.mp3>", "/health"]
-    })
+# Optional cookie file (used only if present)
+COOKIE_FILE = os.getenv("COOKIE_FILE", "/etc/secrets/youtube_cookies2.txt")
 
-@app.route('/health')
+def has_cookie_file():
+    """Check if a cookie file exists and is readable."""
+    return os.path.exists(COOKIE_FILE) and os.access(COOKIE_FILE, os.R_OK)
+
+@app.route("/health", methods=["GET"])
 def health():
-    """Simple readiness check for Render or n8n."""
+    """Simple health check endpoint."""
     return jsonify({
+        "message": "API healthy ✅",
         "status": "ok",
-        "time": datetime.datetime.now().strftime("%d-%m-%Y %H:%M"),
-        "message": "API healthy ✅"
+        "environment": "Render" if os.getenv("RENDER") else "Local",
+        "cookie_found": has_cookie_file(),
+        "time": datetime.now().strftime("%d-%m-%Y %H:%M")
     }), 200
 
-@app.route('/download', methods=['GET'])
+
+@app.route("/download", methods=["GET"])
 def download_audio():
-    url = request.args.get('url')
-    filename = request.args.get('filename', 'audio.mp3')
+    """Download YouTube video as MP3."""
+    url = request.args.get("url")
+    filename = request.args.get("filename", "output.mp3")
 
     if not url:
         return jsonify({"error": "Missing URL"}), 400
 
-    # --- Safe temp directory ---
-    temp_dir = tempfile.mkdtemp()
-    safe_filename = "".join(c if c.isalnum() or c in ("_", "-", ".") else "_" for c in filename)
-    output_path = os.path.join(temp_dir, safe_filename)
-
-    # --- Build yt-dlp command with read-only cookie fix ---
-    command = [
-        "yt-dlp", "-x", "--audio-format", "mp3",
-        "--ignore-errors", "--no-warnings", "--no-progress", "--quiet",
-        "--cookies", "/etc/secrets/youtube_cookies2.txt",
-        "--no-write-pages",
-        "--postprocessor-args", "ffmpeg:-nostdin -hide_banner -loglevel error",
-        "-o", f"{temp_dir}/%(title)s.%(ext)s",
-        url
-    ]
-
-    print(f"⬇️ Downloading: {url}")
-    print("Command:", " ".join(command))
-
     try:
-        result = subprocess.run(command, capture_output=True, text=True, timeout=180)
-        print("yt-dlp exit code:", result.returncode)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = os.path.join(tmpdir, filename)
 
-        # Handle successful download
-        if result.returncode == 0:
-            mp3_files = [f for f in os.listdir(temp_dir) if f.endswith(".mp3")]
-            if not mp3_files:
-                return jsonify({"error": "No audio file produced", "log": result.stderr}), 500
+            # Build yt-dlp command
+            yt_dlp_command = [
+                "yt-dlp",
+                "--quiet",
+                "--no-warnings",
+                "--extract-audio",
+                "--audio-format", "mp3",
+                "--audio-quality", "0",
+                "-o", output_path,
+                url
+            ]
 
-            src = os.path.join(temp_dir, mp3_files[0])
-            os.rename(src, output_path)
-            size_mb = os.path.getsize(output_path) / (1024 * 1024)
-            ts = datetime.datetime.now().strftime("%d-%m-%Y %H:%M")
+            # Add cookies only if available
+            if has_cookie_file():
+                yt_dlp_command.insert(-2, "--cookies")
+                yt_dlp_command.insert(-2, COOKIE_FILE)
 
-            print(f"✅ Moved {src} → {output_path} ({size_mb:.2f} MB)")
-            print(f"🎧 Done: {safe_filename} | {size_mb:.2f} MB | {ts}")
+            result = subprocess.run(
+                yt_dlp_command,
+                capture_output=True,
+                text=True
+            )
 
-            response = send_file(output_path, as_attachment=True, download_name=safe_filename)
-            response.headers["X-File-Size"] = f"{size_mb:.2f} MB"
+            if result.returncode != 0:
+                return jsonify({
+                    "status": "failed",
+                    "log": result.stderr or result.stdout
+                }), 500
 
-            # Clean up temporary files
-            try:
-                for f in os.listdir(temp_dir):
-                    os.remove(os.path.join(temp_dir, f))
-                os.rmdir(temp_dir)
-                print(f"🧹 Cleaned up temp directory: {temp_dir}")
-            except Exception as e:
-                print(f"⚠️ Cleanup skipped: {e}")
+            return send_file(output_path, as_attachment=True)
 
-            return response
-
-        else:
-            print("❌ yt-dlp error:", result.stderr)
-            return jsonify({
-                "log": result.stderr or result.stdout,
-                "status": "failed"
-            }), 500
-
-    except subprocess.TimeoutExpired:
-        return jsonify({"error": "Timeout during download"}), 500
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return jsonify({
+            "status": "failed",
+            "log": str(e)
+        }), 500
+
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=10000)
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
